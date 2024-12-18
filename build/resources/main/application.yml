@@ -1,0 +1,8 @@
+server:
+    port: 443
+    ssl:
+        enabled: true
+        key-store: classpath:keystore.p12
+        key-store-password: 1234567890
+        key-store-type: PKCS12
+    shutdown: graceful
