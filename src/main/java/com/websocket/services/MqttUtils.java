@@ -1,5 +1,6 @@
 package com.websocket.services;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.websocket.configuration.FtpsConnectionConfig;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
@@ -32,6 +33,8 @@ public class MqttUtils {
     private FTPSServiceUtils ftpsServiceUtils;
     @Autowired
     FtpsConnectionConfig ftpsConnectionConfig;
+    @Autowired
+    private EventPublisher eventPublisher;
 
     @Value("${mqtt.config-map.host}")
     private String mqttHost;
@@ -48,47 +51,22 @@ public class MqttUtils {
 
     private final Map<String, MqttConnectOptions> botOptionsMap = new HashMap<>();
     private final Map<String, Sinks.Many<Object>> topicSinkMap = new ConcurrentHashMap<>();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public Flux<Object> fetchAllHeartbeats() {
-        return Flux.create(sink -> {
-            try {
-                synchronized (this) {
-                    if (botOptionsMap.isEmpty() || topicSinkMap.isEmpty()) {
-                        setupMqttConnectionsForAllBots();
-                    }
+        synchronized (this) {
+            if (botOptionsMap.isEmpty() || topicSinkMap.isEmpty()) {
+                try {
+                    setupMqttConnectionsForAllBots();
+                } catch (Exception e) {
+                    return Flux.error(new RuntimeException("Error setting up MQTT connections", e));
                 }
-
-                botOptionsMap.forEach((botId, options) -> {
-                    try {
-                        MqttClient mqttClient = new MqttClient("ssl://" + mqttHost + ":" + mqttPort, "Elecbits_" + botId, null);
-                        mqttClient.connect(options);
-
-                        logger.info("Subscribing to topic for bot {}: heartbeat_{}", botId, botId);
-
-                        mqttClient.subscribe("heartbeat_" + botId, (topic, message) -> {
-                            String payload = new String(message.getPayload());
-                            logger.info("Message received for bot {} on topic {}: {}", botId, topic, payload);
-
-                            topicSinkMap.computeIfAbsent(botId, t -> Sinks.many().multicast().onBackpressureBuffer())
-                                    .tryEmitNext(payload);
-
-                            logger.info("Emitting message to WebSocket: {}", payload);
-
-                            sink.next(Map.of(
-                                    "botId", botId,
-                                    "topic", topic,
-                                    "message", payload
-                            ));
-                        });
-                    } catch (Exception e) {
-                        logger.error("Error subscribing to topic for bot {}: {}", botId, e.getMessage(), e);
-                    }
-                });
-
-            } catch (Exception e) {
-                sink.error(new RuntimeException("Error setting up subscriptions for MQTT topics", e));
             }
-        });
+        }
+
+        return Flux.merge(topicSinkMap.values().stream()
+                .map(Sinks.Many::asFlux)
+                .collect(Collectors.toList()));
     }
 
     private void setupMqttConnectionsForAllBots() throws Exception {
@@ -162,7 +140,18 @@ public class MqttUtils {
                                     mqttClient.subscribe("heartbeat_" + botId, (topic, message) -> {
                                         String payload = new String(message.getPayload());
                                         logger.info("Message received for bot {} on topic {}: {}", botId, topic, payload);
-                                        topicSinkMap.get(botId).tryEmitNext(payload);
+
+                                        try {
+                                            String jsonMessage = objectMapper.writeValueAsString(Map.of(
+                                                    "botId", botId,
+                                                    "topic", topic,
+                                                    "message", payload
+                                            ));
+                                            eventPublisher.publish(jsonMessage);
+                                            logger.info("Message sent to WebSocket: {}", jsonMessage);
+                                        } catch (Exception e) {
+                                            logger.error("Error processing MQTT message for WebSocket: {}", e.getMessage());
+                                        }
                                     });
                                     return null;
                                 })

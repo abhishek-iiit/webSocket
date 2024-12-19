@@ -1,7 +1,8 @@
 package com.websocket;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.websocket.services.EventPublisher;
 import com.websocket.services.MqttUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -15,31 +16,21 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class WebSocketHandler extends TextWebSocketHandler {
 
-    private final MqttUtils mqttUtils;
+    @Autowired
+    private MqttUtils mqttUtils;
+
+    @Autowired
+    private EventPublisher eventPublisher;
+
     private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    public WebSocketHandler(MqttUtils mqttUtils) {
-        this.mqttUtils = mqttUtils;
-
-        Flux<Object> heartbeatStream = mqttUtils.fetchAllHeartbeats();
-
-        heartbeatStream.subscribe(message -> {
-            try {
-                String jsonMessage = objectMapper.writeValueAsString(message);
-                sendToAllSessions(jsonMessage);
-            } catch (Exception e) {
-                System.err.println("Error processing MQTT message: " + e.getMessage());
-            }
-        }, error -> {
-            System.err.println("Error in MQTT Flux: " + error.getMessage());
-        });
-    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         sessions.add(session);
         System.out.println("WebSocket connected: " + session.getId());
+        mqttUtils.fetchAllHeartbeats().subscribe();
+        Flux<String> messageFlux = eventPublisher.getSink().asFlux();
+        messageFlux.subscribe(this::sendToAllSessions);
     }
 
     @Override
@@ -48,7 +39,7 @@ public class WebSocketHandler extends TextWebSocketHandler {
         System.out.println("WebSocket disconnected: " + session.getId());
     }
 
-    private void sendToAllSessions(String message) {
+    public void sendToAllSessions(String message) {
         System.out.println("Broadcasting message to all WebSocket sessions: " + message);
         sessions.forEach(session -> {
             try {
