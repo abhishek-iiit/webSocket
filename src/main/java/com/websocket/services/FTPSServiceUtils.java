@@ -82,8 +82,7 @@ public class FTPSServiceUtils {
         }
     }
 
-    public Map<String, InputStream> fetchMultipleFiles(List<String> remoteFilePaths, FtpsConnectionConfig config) {
-        FTPSClient ftpsClient = createFtpsClient(config);
+    public Map<String, InputStream> fetchMultipleFiles(List<String> remoteFilePaths, FTPSClient ftpsClient) {
         Map<String, InputStream> fileStreams = new HashMap<>();
 
         try {
@@ -99,14 +98,11 @@ public class FTPSServiceUtils {
             }
         } catch (IOException ex) {
             logger.error("Error retrieving files: {}", ex.getMessage(), ex);
-        } finally {
-            disconnectClientSafely(ftpsClient);
         }
         return fileStreams;
     }
 
-    public List<String> lsFilesAtLocation(String remoteFilePath, FtpsConnectionConfig config) {
-        FTPSClient ftpsClient = createFtpsClient(config);
+    public List<String> lsFilesAtLocation(String remoteFilePath, FTPSClient ftpsClient) {
         List<String> fileNames = new ArrayList<>();
         if (Objects.nonNull(ftpsClient)) {
             try {
@@ -125,8 +121,6 @@ public class FTPSServiceUtils {
                 }
             } catch (IOException ex) {
                 logger.error("Error listing files at location {}: {}", remoteFilePath, ex);
-            } finally {
-                disconnectClientSafely(ftpsClient);
             }
         }
         return fileNames;

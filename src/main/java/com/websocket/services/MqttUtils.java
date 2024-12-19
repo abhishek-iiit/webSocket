@@ -2,6 +2,7 @@ package com.websocket.services;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.websocket.configuration.FtpsConnectionConfig;
+import org.apache.commons.net.ftp.FTPSClient;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
@@ -19,16 +20,15 @@ import reactor.util.retry.Retry;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.InputStream;
 import java.time.Duration;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Component
 public class MqttUtils {
     private final Logger logger = LoggerFactory.getLogger(this.getClass());
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     @Autowired
     private FTPSServiceUtils ftpsServiceUtils;
     @Autowired
@@ -49,34 +49,25 @@ public class MqttUtils {
     @Value("${mqtt.config-map.subscribePassword}")
     private String mqttSubscribePassword;
 
-    private final Map<String, MqttConnectOptions> botOptionsMap = new HashMap<>();
-    private final Map<String, Sinks.Many<Object>> topicSinkMap = new ConcurrentHashMap<>();
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
     public Flux<Object> fetchAllHeartbeats() {
-        synchronized (this) {
-            if (botOptionsMap.isEmpty() || topicSinkMap.isEmpty()) {
-                try {
-                    setupMqttConnectionsForAllBots();
-                } catch (Exception e) {
-                    return Flux.error(new RuntimeException("Error setting up MQTT connections", e));
-                }
-            }
+        try {
+            setupMqttConnectionsForAllBots();
+        } catch (Exception e) {
+            return Flux.error(new RuntimeException("Error setting up MQTT connections", e));
         }
-
-        return Flux.merge(topicSinkMap.values().stream()
-                .map(Sinks.Many::asFlux)
-                .collect(Collectors.toList()));
+        return Flux.empty();
     }
 
     private void setupMqttConnectionsForAllBots() throws Exception {
-        List<String> botDirectories = ftpsServiceUtils.lsFilesAtLocation("/certificates/", ftpsConnectionConfig);
+        FTPSClient ftpsClient = ftpsServiceUtils.createFtpsClient(ftpsConnectionConfig);
+
+        List<String> botDirectories = ftpsServiceUtils.lsFilesAtLocation("/certificates/", ftpsClient);
         if (botDirectories.isEmpty()) {
             throw new RuntimeException("No bot directories found under '/certificates/'");
         }
 
         Map<String, InputStream> fileStreams = ftpsServiceUtils.fetchMultipleFiles(
-                Arrays.asList("/certificates/CA/ca_GW35-h1f1-1024-0101-AA00.crt"), ftpsConnectionConfig);
+                Arrays.asList("/certificates/CA/ca_GW35-h1f1-1024-0101-AA00.crt"), ftpsClient);
         InputStream caCertStream = fileStreams.get("/certificates/CA/ca_GW35-h1f1-1024-0101-AA00.crt");
         if (caCertStream == null) {
             throw new RuntimeException("Failed to retrieve CA certificate from SFTP.");
@@ -88,7 +79,7 @@ public class MqttUtils {
         for (String botDir : botDirectories) {
             Map<String, InputStream> botFileStreams = ftpsServiceUtils.fetchMultipleFiles(
                     Arrays.asList("/certificates/" + botDir + "/client_" + botDir + ".crt",
-                            "/certificates/" + botDir + "/client_" + botDir + ".key"), ftpsConnectionConfig);
+                            "/certificates/" + botDir + "/client_" + botDir + ".key"), ftpsClient);
 
             InputStream clientCertStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".crt");
             InputStream clientKeyStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".key");
@@ -118,29 +109,33 @@ public class MqttUtils {
             botOptionsMap.put(botDir, options);
         }
 
+        ftpsServiceUtils.disconnectClientSafely(ftpsClient);
+
         List<Mono<Void>> mqttConnectionTasks = botOptionsMap.entrySet().stream()
-                .map(entry -> {
-                    String botId = entry.getKey();
-                    MqttConnectOptions options = entry.getValue();
+                .map(entry -> connectBot(entry.getKey(), entry.getValue()))
+                .collect(Collectors.toList());
+        Mono.when(mqttConnectionTasks).subscribe();
+    }
 
-                    return Mono.defer(() -> {
-                        MqttClient mqttClient;
-                        try {
-                            mqttClient = new MqttClient("ssl://" + mqttHost + ":" + mqttPort, "Elecbits_" + botId, null);
-                        } catch (MqttException e) {
-                            logger.error("Error creating MqttClient for bot {}: {}", botId, e.getMessage());
-                            return Mono.empty();
-                        }
-                        return Mono.fromCallable(() -> {
-                                    mqttClient.connect(options);
-                                    logger.info("Connected to MQTT broker successfully for bot: {}", botId);
-
-                                    topicSinkMap.put(botId, Sinks.many().multicast().onBackpressureBuffer());
-
+    private Mono<Void> connectBot(String botId, MqttConnectOptions options) {
+        return Mono.defer(() -> {
+            MqttClient mqttClient;
+            try {
+                mqttClient = new MqttClient("ssl://" + mqttHost + ":" + mqttPort, "Elecbits_" + botId, null);
+            } catch (MqttException e) {
+                logger.error("Error creating MqttClient for bot {}: {}", botId, e.getMessage());
+                return Mono.empty();
+            }
+            return Mono.fromCallable(() -> {
+                        mqttClient.connect(options);
+                        logger.info("Connected to MQTT broker successfully for bot: {}", botId);
+                        return null;
+                    }).retryWhen(Retry.fixedDelay(5, Duration.ofSeconds(5)))
+                    .then(Mono.fromRunnable(() -> {
+                        Mono.fromCallable(() -> {
                                     mqttClient.subscribe("heartbeat_" + botId, (topic, message) -> {
                                         String payload = new String(message.getPayload());
                                         logger.info("Message received for bot {} on topic {}: {}", botId, topic, payload);
-
                                         try {
                                             String jsonMessage = objectMapper.writeValueAsString(Map.of(
                                                     "botId", botId,
@@ -148,22 +143,20 @@ public class MqttUtils {
                                                     "message", payload
                                             ));
                                             eventPublisher.publish(jsonMessage);
-                                            logger.info("Message sent to WebSocket: {}", jsonMessage);
                                         } catch (Exception e) {
                                             logger.error("Error processing MQTT message for WebSocket: {}", e.getMessage());
                                         }
                                     });
                                     return null;
                                 })
-                                .then()
                                 .retryWhen(Retry.fixedDelay(5, Duration.ofSeconds(5)))
-                                .onErrorResume(e -> {
-                                    logger.error("Failed to connect to MQTT broker for bot {} after retries: {}", botId, e.getMessage());
-                                    return Mono.empty();
-                                });
-                    }).subscribeOn(Schedulers.boundedElastic());
-                })
-                .collect(Collectors.toList());
-        Mono.when(mqttConnectionTasks).subscribe();
+                                .doOnTerminate(() -> logger.info("Subscribed to topic for bot: {}", botId))
+                                .subscribe();
+                    }))
+                    .onErrorResume(e -> {
+                        logger.error("Failed to connect to MQTT broker for bot {} after retries: {}", botId, e.getMessage());
+                        return Mono.empty();
+                    });
+        }).subscribeOn(Schedulers.boundedElastic()).then();
     }
 }

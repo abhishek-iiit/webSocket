@@ -2,6 +2,8 @@ package com.websocket;
 
 import com.websocket.services.EventPublisher;
 import com.websocket.services.MqttUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
@@ -15,20 +17,21 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class WebSocketHandler extends TextWebSocketHandler {
-
-    @Autowired
-    private MqttUtils mqttUtils;
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
+    private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
 
     @Autowired
     private EventPublisher eventPublisher;
 
-    private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
+    @Autowired
+    public WebSocketHandler(MqttUtils mqttUtils){
+        mqttUtils.fetchAllHeartbeats().subscribe();
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         sessions.add(session);
-        System.out.println("WebSocket connected: " + session.getId());
-        mqttUtils.fetchAllHeartbeats().subscribe();
+        logger.info("WebSocket connected: " + session.getId());
         Flux<String> messageFlux = eventPublisher.getSink().asFlux();
         messageFlux.subscribe(this::sendToAllSessions);
     }
@@ -36,19 +39,17 @@ public class WebSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionClosed(WebSocketSession session, org.springframework.web.socket.CloseStatus status) {
         sessions.remove(session);
-        System.out.println("WebSocket disconnected: " + session.getId());
+        logger.info("WebSocket disconnected: " + session.getId());
     }
 
     public void sendToAllSessions(String message) {
-        System.out.println("Broadcasting message to all WebSocket sessions: " + message);
         sessions.forEach(session -> {
             try {
                 if (session.isOpen()) {
                     session.sendMessage(new TextMessage(message));
-                    System.out.println("Message sent to session: " + session.getId());
                 }
             } catch (IOException e) {
-                System.err.println("Error sending message to WebSocket session: " + e.getMessage());
+                logger.info("Error sending message to WebSocket session: " + e.getMessage());
             }
         });
     }
