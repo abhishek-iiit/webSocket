@@ -80,8 +80,6 @@ public class SslUtil {
 
         SSLContext context = SSLContext.getInstance("TLS");
         context.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), null);
-
-        logger.info("SSL context initialized successfully");
         return context.getSocketFactory();
     }
 }

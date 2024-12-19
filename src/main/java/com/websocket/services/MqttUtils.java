@@ -13,7 +13,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 import reactor.util.retry.Retry;
 
@@ -21,7 +20,6 @@ import javax.net.ssl.SSLSocketFactory;
 import java.io.InputStream;
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Component
@@ -135,7 +133,7 @@ public class MqttUtils {
                         Mono.fromCallable(() -> {
                                     mqttClient.subscribe("heartbeat_" + botId, (topic, message) -> {
                                         String payload = new String(message.getPayload());
-                                        logger.info("Message received for bot {} on topic {}: {}", botId, topic, payload);
+//                                        logger.info("Message received for bot {} on topic {}: {}", botId, topic, payload);
                                         try {
                                             String jsonMessage = objectMapper.writeValueAsString(Map.of(
                                                     "botId", botId,

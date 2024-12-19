@@ -22,12 +22,9 @@ public class FTPSServiceUtils {
 
         FTPSClient ftpsClient = new FTPSClient(config.isUseImplicit() ? "TLS" : "SSL");
         try {
-            logger.info("FTPS Credentials: {}", config);
-
             validateConfig(config);
 
             ftpsClient.connect(config.getHost(), config.getPort());
-            logger.info("Connected to FTPS server: {}", config.getHost());
 
             ftpsClient.setSoTimeout(config.getSessionTimeout());
             ftpsClient.setDataTimeout(config.getDataTimeout());
@@ -36,15 +33,12 @@ public class FTPSServiceUtils {
             if (!loggedIn) {
                 throw new IOException("FTPS login failed for user: " + config.getUsername());
             }
-            logger.info("Authenticated successfully for user: {}", config.getUsername());
 
             ftpsClient.execPBSZ(0);
             ftpsClient.execPROT("P");
             ftpsClient.setFileType(FTPSClient.BINARY_FILE_TYPE);
 
             ftpsClient.enterLocalPassiveMode();
-            logger.info("FTPS Client setup completed successfully");
-
             return ftpsClient;
 
         } catch (IOException e) {
@@ -67,7 +61,6 @@ public class FTPSServiceUtils {
         if (config.getPassword() == null || config.getPassword().isEmpty()) {
             throw new IllegalArgumentException("FTPS password must not be null or empty");
         }
-        logger.info("FTPS configuration validated successfully");
     }
 
     public void disconnectClientSafely(FTPSClient ftpsClient) {
@@ -89,7 +82,6 @@ public class FTPSServiceUtils {
             for (String remoteFilePath : remoteFilePaths) {
                 ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
                 if (ftpsClient.retrieveFile(remoteFilePath, outputStream)) {
-                    logger.info("Successfully retrieved file: {}", remoteFilePath);
                     fileStreams.put(remoteFilePath, new ByteArrayInputStream(outputStream.toByteArray()));
                 } else {
                     logger.error("Failed to retrieve file: {}", remoteFilePath);
