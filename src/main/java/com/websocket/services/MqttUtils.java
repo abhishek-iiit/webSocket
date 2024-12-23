@@ -26,6 +26,7 @@ import java.util.stream.Collectors;
 public class MqttUtils {
     private final Logger logger = LoggerFactory.getLogger(this.getClass());
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private static final int MAX_CONCURRENT_BOTS = 10;
 
     @Autowired
     private FTPSServiceUtils ftpsServiceUtils;
@@ -47,16 +48,17 @@ public class MqttUtils {
     @Value("${mqtt.config-map.subscribePassword}")
     private String mqttSubscribePassword;
 
-    public Flux<Object> fetchAllHeartbeats() {
-        try {
-            setupMqttConnectionsForAllBots();
-        } catch (Exception e) {
-            return Flux.error(new RuntimeException("Error setting up MQTT connections", e));
-        }
-        return Flux.empty();
+    public Flux<Void> fetchAllHeartbeats() {
+        return Flux.defer(() -> {
+            try {
+                return setupMqttConnectionsForAllBots();
+            } catch (Exception e) {
+                return Flux.error(new RuntimeException("Error setting up MQTT connections", e));
+            }
+        });
     }
 
-    private void setupMqttConnectionsForAllBots() throws Exception {
+    private Flux<Void> setupMqttConnectionsForAllBots() throws Exception {
         FTPSClient ftpsClient = ftpsServiceUtils.createFtpsClient(ftpsConnectionConfig);
 
         List<String> botDirectories = ftpsServiceUtils.lsFilesAtLocation("/certificates/", ftpsClient);
@@ -72,47 +74,43 @@ public class MqttUtils {
         }
         byte[] caCertBytes = caCertStream.readAllBytes();
 
-        Map<String, MqttConnectOptions> botOptionsMap = new HashMap<>();
+        return Flux.fromIterable(botDirectories)
+                .flatMap(botDir -> setupConnectionForBot(botDir, caCertBytes, ftpsClient), MAX_CONCURRENT_BOTS)
+                .doFinally(signalType -> ftpsServiceUtils.disconnectClientSafely(ftpsClient));
+    }
 
-        for (String botDir : botDirectories) {
-            Map<String, InputStream> botFileStreams = ftpsServiceUtils.fetchMultipleFiles(
-                    Arrays.asList("/certificates/" + botDir + "/client_" + botDir + ".crt",
-                            "/certificates/" + botDir + "/client_" + botDir + ".key"), ftpsClient);
-
-            InputStream clientCertStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".crt");
-            InputStream clientKeyStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".key");
-
-            if (clientCertStream == null || clientKeyStream == null) {
-                logger.warn("Failed to retrieve certificates for bot: {}", botDir);
-                continue;
-            }
-
-            SSLSocketFactory sslSocketFactory = null;
+    private Mono<Void> setupConnectionForBot(String botDir, byte[] caCertBytes, FTPSClient ftpsClient) {
+        return Mono.defer(() -> {
             try {
-                sslSocketFactory = SslUtil.getSocketFactory(caCertBytes, clientCertStream, clientKeyStream);
+                Map<String, InputStream> botFileStreams = ftpsServiceUtils.fetchMultipleFiles(
+                        Arrays.asList("/certificates/" + botDir + "/client_" + botDir + ".crt",
+                                "/certificates/" + botDir + "/client_" + botDir + ".key"), ftpsClient);
+
+                InputStream clientCertStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".crt");
+                InputStream clientKeyStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".key");
+
+                if (clientCertStream == null || clientKeyStream == null) {
+                    logger.warn("Failed to retrieve certificates for bot: {}", botDir);
+                    return Mono.empty();
+                }
+
+                SSLSocketFactory sslSocketFactory = SslUtil.getSocketFactory(caCertBytes, clientCertStream, clientKeyStream);
+
+                MqttConnectOptions options = new MqttConnectOptions();
+                options.setServerURIs(new String[]{"ssl://" + mqttHost + ":" + mqttPort});
+                options.setCleanSession(false);
+                options.setSocketFactory(sslSocketFactory);
+                options.setUserName(mqttSubscribeUsername);
+                options.setPassword(mqttSubscribePassword.toCharArray());
+                options.setConnectionTimeout(10);
+                options.setKeepAliveInterval(20);
+                options.setAutomaticReconnect(true);
+                return connectBot(botDir, options);
             } catch (Exception e) {
-                logger.error("Failed to create SSLSocketFactory for bot: {}", botDir, e);
-                continue;
+                logger.error("Failed to set up connection for bot: {}", botDir, e);
+                return Mono.empty();
             }
-
-            MqttConnectOptions options = new MqttConnectOptions();
-            options.setServerURIs(new String[]{"ssl://" + mqttHost + ":" + mqttPort});
-            options.setCleanSession(false);
-            options.setSocketFactory(sslSocketFactory);
-            options.setUserName(mqttSubscribeUsername);
-            options.setPassword(mqttSubscribePassword.toCharArray());
-            options.setConnectionTimeout(10);
-            options.setKeepAliveInterval(20);
-            options.setAutomaticReconnect(true);
-            botOptionsMap.put(botDir, options);
-        }
-
-        ftpsServiceUtils.disconnectClientSafely(ftpsClient);
-
-        List<Mono<Void>> mqttConnectionTasks = botOptionsMap.entrySet().stream()
-                .map(entry -> connectBot(entry.getKey(), entry.getValue()))
-                .collect(Collectors.toList());
-        Mono.when(mqttConnectionTasks).subscribe();
+        });
     }
 
     private Mono<Void> connectBot(String botId, MqttConnectOptions options) {
@@ -133,7 +131,6 @@ public class MqttUtils {
                         Mono.fromCallable(() -> {
                                     mqttClient.subscribe("heartbeat_" + botId, (topic, message) -> {
                                         String payload = new String(message.getPayload());
-//                                        logger.info("Message received for bot {} on topic {}: {}", botId, topic, payload);
                                         try {
                                             String jsonMessage = objectMapper.writeValueAsString(Map.of(
                                                     "botId", botId,
