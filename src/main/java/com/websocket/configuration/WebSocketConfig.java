@@ -18,6 +18,7 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        registry.addHandler(webSocketHandler, "/ws/heartbeat").setAllowedOrigins("*");
+        registry.addHandler(webSocketHandler, "/ws/heartbeat/all").setAllowedOrigins("*");
+        registry.addHandler(webSocketHandler, "/ws/heartbeat/{botId}").setAllowedOrigins("*");
     }
 }
