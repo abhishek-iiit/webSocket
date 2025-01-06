@@ -1,6 +1,11 @@
 server:
     port: 8443
     shutdown: graceful
+    ssl:
+        enabled: true
+        key-store: classpath:keystore.p12
+        key-store-password: 123456
+        key-store-type: PKCS12
 
 ftps:
     config-map:
