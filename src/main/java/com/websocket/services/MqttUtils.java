@@ -61,43 +61,40 @@ public class MqttUtils {
     private Flux<Void> setupMqttConnectionsForAllBots() throws Exception {
         FTPSClient ftpsClient = ftpsServiceUtils.createFtpsClient(ftpsConnectionConfig);
 
-        List<String> botDirectories = ftpsServiceUtils.lsFilesAtLocation("/certificates/", ftpsClient);
+        List<String> botDirectories = ftpsServiceUtils.lsFilesAtLocation("/devices/", ftpsClient);
         if (botDirectories.isEmpty()) {
-            throw new RuntimeException("No bot directories found under '/certificates/'");
+            throw new RuntimeException("No bot directories found under '/devices/'");
         }
-
-        Map<String, InputStream> fileStreams = ftpsServiceUtils.fetchMultipleFiles(
-                Arrays.asList("/certificates/CA/ca_GW35-h1f1-1024-0101-AA00.crt"), ftpsClient);
-        InputStream caCertStream = fileStreams.get("/certificates/CA/ca_GW35-h1f1-1024-0101-AA00.crt");
-        if (caCertStream == null) {
-            throw new RuntimeException("Failed to retrieve CA certificate from SFTP.");
-        }
-        byte[] caCertBytes = caCertStream.readAllBytes();
 
         return Flux.fromIterable(botDirectories)
-                .flatMap(botDir -> setupConnectionForBot(botDir, caCertBytes, ftpsClient), MAX_CONCURRENT_BOTS)
+                .flatMap(botDir -> setupConnectionForBot(botDir, ftpsClient), MAX_CONCURRENT_BOTS)
                 .doFinally(signalType -> ftpsServiceUtils.disconnectClientSafely(ftpsClient));
     }
 
-    private Mono<Void> setupConnectionForBot(String botDir, byte[] caCertBytes, FTPSClient ftpsClient) {
+    private Mono<Void> setupConnectionForBot(String botDir, FTPSClient ftpsClient) {
         return Mono.defer(() -> {
             try {
                 Map<String, InputStream> botFileStreams = ftpsServiceUtils.fetchMultipleFiles(
-                        Arrays.asList("/certificates/" + botDir + "/client_" + botDir + ".crt",
-                                "/certificates/" + botDir + "/client_" + botDir + ".key"), ftpsClient);
+                        Arrays.asList(
+                                "/devices/" + botDir + "/mqtt_rootca.crt",
+                                "/devices/" + botDir + "/mqtt_client.crt",
+                                "/devices/" + botDir + "/mqtt_private.key"),
+                        ftpsClient);
 
-                InputStream clientCertStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".crt");
-                InputStream clientKeyStream = botFileStreams.get("/certificates/" + botDir + "/client_" + botDir + ".key");
+                InputStream caCertStream = botFileStreams.get("/devices/" + botDir + "/mqtt_rootca.crt");
+                InputStream clientCertStream = botFileStreams.get("/devices/" + botDir + "/mqtt_client.crt");
+                InputStream clientKeyStream = botFileStreams.get("/devices/" + botDir + "/mqtt_private.key");
 
-                if (clientCertStream == null || clientKeyStream == null) {
+                if (caCertStream == null || clientCertStream == null || clientKeyStream == null) {
                     logger.warn("Failed to retrieve certificates for bot: {}", botDir);
                     return Mono.empty();
                 }
 
-                SSLSocketFactory sslSocketFactory = SslUtil.getSocketFactory(caCertBytes, clientCertStream, clientKeyStream);
+                SSLSocketFactory sslSocketFactory = SslUtil.getSocketFactory(caCertStream.readAllBytes(), clientCertStream,
+                        clientKeyStream);
 
                 MqttConnectOptions options = new MqttConnectOptions();
-                options.setServerURIs(new String[]{"ssl://" + mqttHost + ":" + mqttPort});
+                options.setServerURIs(new String[] { "ssl://" + mqttHost + ":" + mqttPort });
                 options.setCleanSession(false);
                 options.setSocketFactory(sslSocketFactory);
                 options.setUserName(mqttSubscribeUsername);
@@ -123,33 +120,33 @@ public class MqttUtils {
                 return Mono.empty();
             }
             return Mono.fromCallable(() -> {
-                        mqttClient.connect(options);
-                        logger.info("Connected to MQTT broker successfully for bot: {}", botId);
-                        return null;
-                    }).retryWhen(Retry.fixedDelay(5, Duration.ofSeconds(5)))
+                mqttClient.connect(options);
+                logger.info("Connected to MQTT broker successfully for bot: {}", botId);
+                return null;
+            }).retryWhen(Retry.fixedDelay(5, Duration.ofSeconds(5)))
                     .then(Mono.fromRunnable(() -> {
                         Mono.fromCallable(() -> {
-                                    mqttClient.subscribe("heartbeat_" + botId, (topic, message) -> {
-                                        String payload = new String(message.getPayload());
-                                        try {
-                                            String jsonMessage = objectMapper.writeValueAsString(Map.of(
-                                                    "botId", botId,
-                                                    "topic", topic,
-                                                    "message", payload
-                                            ));
-                                            eventPublisher.publish(jsonMessage);
-                                        } catch (Exception e) {
-                                            logger.error("Error processing MQTT message for WebSocket: {}", e.getMessage());
-                                        }
-                                    });
-                                    return null;
-                                })
+                            mqttClient.subscribe("heartbeat_" + botId, (topic, message) -> {
+                                String payload = new String(message.getPayload());
+                                try {
+                                    String jsonMessage = objectMapper.writeValueAsString(Map.of(
+                                            "botId", botId,
+                                            "topic", topic,
+                                            "message", payload));
+                                    eventPublisher.publish(jsonMessage);
+                                } catch (Exception e) {
+                                    logger.error("Error processing MQTT message for WebSocket: {}", e.getMessage());
+                                }
+                            });
+                            return null;
+                        })
                                 .retryWhen(Retry.fixedDelay(5, Duration.ofSeconds(5)))
                                 .doOnTerminate(() -> logger.info("Subscribed to topic for bot: {}", botId))
                                 .subscribe();
                     }))
                     .onErrorResume(e -> {
-                        logger.error("Failed to connect to MQTT broker for bot {} after retries: {}", botId, e.getMessage());
+                        logger.error("Failed to connect to MQTT broker for bot {} after retries: {}", botId,
+                                e.getMessage());
                         return Mono.empty();
                     });
         }).subscribeOn(Schedulers.boundedElastic()).then();
